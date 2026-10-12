@@ -323,10 +323,13 @@ app.post(
 app.get("/events", authenticateToken, async (req, res) => {
   try {
     const result = await pool.query(
-      `SELECT id, title, date, time, place, kind, color,
-              attending, latitude, longitude, radius
-       FROM events
-       ORDER BY created_at DESC`,
+      `SELECT e.id, e.title, e.date, e.time, e.place, e.kind, e.color,
+        COUNT(r.id)::INTEGER AS attending,
+        e.latitude, e.longitude, e.radius
+ FROM events e
+ LEFT JOIN event_registrations r ON r.event_id = e.id
+ GROUP BY e.id
+ ORDER BY e.created_at DESC`
     );
 
     return res.json({ events: result.rows });
