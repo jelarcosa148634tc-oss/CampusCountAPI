@@ -602,3 +602,16 @@ app.delete("/events/:eventId", authenticateToken, async (req, res) => {
     client.release();
   }
 });
+
+
+initializeDatabase()
+  .then(() => {
+    app.listen(PORT, () => {
+      console.log(`CampusCount API running on port ${PORT}`);
+    });
+  })
+  .catch((error) => {
+    console.error("Database initialization failed:", error);
+    process.exit(1);
+  });
+
