@@ -76,18 +76,23 @@ app.get("/", async (req, res) => {
 
 async function initializeDatabase() {
   await pool.query(`
-    CREATE TABLE IF NOT EXISTS users (
-      id SERIAL PRIMARY KEY,
-      name VARCHAR(150) NOT NULL,
-      email VARCHAR(255) UNIQUE NOT NULL,
-      password_hash TEXT NOT NULL,
-      role VARCHAR(20) NOT NULL
-        CHECK (role IN ('Student', 'Organizer')),
-      personal_email VARCHAR(255),
-      must_change_password BOOLEAN NOT NULL DEFAULT FALSE,
+    CREATE TABLE IF NOT EXISTS events (
+      id VARCHAR(100) PRIMARY KEY,
+      title VARCHAR(255) NOT NULL,
+      date VARCHAR(50) NOT NULL,
+      time VARCHAR(50) NOT NULL,
+      place VARCHAR(255) NOT NULL,
+      kind VARCHAR(100) NOT NULL,
+      color VARCHAR(20) NOT NULL,
+      attending INTEGER NOT NULL DEFAULT 0,
+      latitude DOUBLE PRECISION NOT NULL DEFAULT 0,
+      longitude DOUBLE PRECISION NOT NULL DEFAULT 0,
+      radius DOUBLE PRECISION NOT NULL DEFAULT 100,
+      created_by INTEGER REFERENCES users(id),
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
   `);
+
   await pool.query(`
     ALTER TABLE users
     ADD COLUMN IF NOT EXISTS program VARCHAR(150)
@@ -125,7 +130,24 @@ async function initializeDatabase() {
     }
   }
 
-  console.log("PostgreSQL connected; users table is ready.");
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS event_registrations (
+      id SERIAL PRIMARY KEY,
+      student_id INTEGER NOT NULL
+        REFERENCES users(id) ON DELETE CASCADE,
+      event_id VARCHAR(100) NOT NULL,
+      event_title VARCHAR(255) NOT NULL,
+      event_date VARCHAR(50),
+      event_time VARCHAR(50),
+      event_place VARCHAR(255),
+      registered_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (student_id, event_id)
+    )
+  `);
+
+  console.log(
+    "PostgreSQL connected; users and event registrations tables are ready.",
+  );
 }
 
 app.post("/login", async (req, res) => {
@@ -297,3 +319,227 @@ app.post(
     }
   },
 );
+
+app.get("/events", authenticateToken, async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT id, title, date, time, place, kind, color,
+              attending, latitude, longitude, radius
+       FROM events
+       ORDER BY created_at DESC`,
+    );
+
+    return res.json({ events: result.rows });
+  } catch (error) {
+    console.error("Fetching events failed:", error.message);
+    return res.status(500).json({
+      message: "Unable to load events.",
+    });
+  }
+});
+
+app.post("/events", authenticateToken, async (req, res) => {
+  if (req.user.role !== "Organizer") {
+    return res.status(403).json({
+      message: "Only organizers can create events.",
+    });
+  }
+
+  const {
+    id,
+    title,
+    date,
+    time,
+    place,
+    kind,
+    color,
+    latitude,
+    longitude,
+    radius,
+  } = req.body;
+
+  if (
+    typeof id !== "string" ||
+    !id.trim() ||
+    typeof title !== "string" ||
+    !title.trim() ||
+    typeof date !== "string" ||
+    !date.trim() ||
+    typeof time !== "string" ||
+    !time.trim() ||
+    typeof place !== "string" ||
+    !place.trim() ||
+    typeof kind !== "string" ||
+    !kind.trim() ||
+    typeof color !== "string" ||
+    !color.trim() ||
+    !Number.isFinite(latitude) ||
+    !Number.isFinite(longitude) ||
+    !Number.isFinite(radius) ||
+    radius <= 0
+  ) {
+    return res.status(400).json({
+      message: "Please provide valid event details.",
+    });
+  }
+
+  try {
+    const result = await pool.query(
+      `INSERT INTO events
+        (id, title, date, time, place, kind, color,
+         latitude, longitude, radius, created_by)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+       RETURNING id, title, date, time, place, kind, color,
+                 attending, latitude, longitude, radius`,
+      [
+        id.trim(),
+        title.trim(),
+        date.trim(),
+        time.trim(),
+        place.trim(),
+        kind.trim(),
+        color.trim(),
+        latitude,
+        longitude,
+        radius,
+        req.user.id,
+      ],
+    );
+
+    return res.status(201).json({
+      message: "Event created successfully.",
+      event: result.rows[0],
+    });
+  } catch (error) {
+    if (error.code === "23505") {
+      return res.status(409).json({
+        message: "This event ID already exists.",
+      });
+    }
+
+    console.error("Creating event failed:", error.message);
+    return res.status(500).json({
+      message: "Unable to create event.",
+    });
+  }
+});
+
+app.post("/event-registrations", authenticateToken, async (req, res) => {
+  if (req.user.role !== "Student") {
+    return res.status(403).json({
+      message: "Only students can register for events.",
+    });
+  }
+
+  const { eventId, eventTitle, eventDate, eventTime, eventPlace } = req.body;
+
+  if (
+    typeof eventId !== "string" ||
+    !eventId.trim() ||
+    typeof eventTitle !== "string" ||
+    !eventTitle.trim()
+  ) {
+    return res.status(400).json({
+      message: "Event ID and title are required.",
+    });
+  }
+
+  try {
+    const result = await pool.query(
+      `INSERT INTO event_registrations
+        (student_id, event_id, event_title, event_date, event_time, event_place)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       ON CONFLICT (student_id, event_id) DO NOTHING
+       RETURNING id, event_id, event_title, event_date, event_time,
+                 event_place, registered_at`,
+      [
+        req.user.id,
+        eventId.trim(),
+        eventTitle.trim(),
+        typeof eventDate === "string" ? eventDate : null,
+        typeof eventTime === "string" ? eventTime : null,
+        typeof eventPlace === "string" ? eventPlace : null,
+      ],
+    );
+
+    if (result.rowCount === 0) {
+      return res.status(409).json({
+        message: "You are already registered for this event.",
+      });
+    }
+
+    return res.status(201).json({
+      message: "Event registration saved.",
+      registration: result.rows[0],
+    });
+  } catch (error) {
+    console.error("Event registration failed:", error.message);
+    return res.status(500).json({
+      message: "Unable to save event registration.",
+    });
+  }
+});
+
+app.get("/event-registrations", authenticateToken, async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT id, event_id, event_title, event_date, event_time,
+              event_place, registered_at
+       FROM event_registrations
+       WHERE student_id = $1
+       ORDER BY registered_at DESC`,
+      [req.user.id],
+    );
+
+    return res.json({ registrations: result.rows });
+  } catch (error) {
+    console.error("Fetching event registrations failed:", error.message);
+    return res.status(500).json({
+      message: "Unable to load event registrations.",
+    });
+  }
+});
+
+app.delete(
+  "/event-registrations/:eventId",
+  authenticateToken,
+  async (req, res) => {
+    if (req.user.role !== "Student") {
+      return res.status(403).json({
+        message: "Only students can cancel event registrations.",
+      });
+    }
+
+    try {
+      const result = await pool.query(
+        `DELETE FROM event_registrations
+         WHERE student_id = $1 AND event_id = $2
+         RETURNING id`,
+        [req.user.id, req.params.eventId],
+      );
+
+      if (result.rowCount === 0) {
+        return res.status(404).json({
+          message: "Registration not found.",
+        });
+      }
+
+      return res.json({ message: "Event registration cancelled." });
+    } catch (error) {
+      console.error("Cancelling event registration failed:", error.message);
+      return res.status(500).json({
+        message: "Unable to cancel event registration.",
+      });
+    }
+  },
+);
+initializeDatabase()
+  .then(() => {
+    app.listen(PORT, () => {
+      console.log(`CampusCount API running on port ${PORT}`);
+    });
+  })
+  .catch((error) => {
+    console.error("Database initialization failed:", error);
+    process.exit(1);
+  });
