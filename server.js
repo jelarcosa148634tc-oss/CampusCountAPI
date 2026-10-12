@@ -536,13 +536,69 @@ app.delete(
     }
   },
 );
-initializeDatabase()
-  .then(() => {
-    app.listen(PORT, () => {
-      console.log(`CampusCount API running on port ${PORT}`);
+
+app.delete("/events/:eventId", authenticateToken, async (req, res) => {
+  if (req.user.role !== "Organizer") {
+    return res.status(403).json({
+      message: "Only organizers can delete events.",
     });
-  })
-  .catch((error) => {
-    console.error("Database initialization failed:", error);
-    process.exit(1);
-  });
+  }
+
+  const client = await pool.connect();
+  let transactionStarted = false;
+
+  try {
+    await client.query("BEGIN");
+    transactionStarted = true;
+
+    const eventResult = await client.query(
+      `SELECT id, created_by
+       FROM events
+       WHERE id = $1
+       FOR UPDATE`,
+      [req.params.eventId],
+    );
+
+    if (eventResult.rowCount === 0) {
+      await client.query("ROLLBACK");
+      transactionStarted = false;
+      return res.status(404).json({
+        message: "Event not found.",
+        localOnly: true,
+      });
+    }
+
+    if (String(eventResult.rows[0].created_by) !== String(req.user.id)) {
+      await client.query("ROLLBACK");
+      transactionStarted = false;
+      return res.status(403).json({
+        message: "You can only delete events you created.",
+      });
+    }
+
+    await client.query(
+      "DELETE FROM event_registrations WHERE event_id = $1",
+      [req.params.eventId],
+    );
+
+    await client.query(
+      "DELETE FROM events WHERE id = $1 AND created_by = $2",
+      [req.params.eventId, req.user.id],
+    );
+
+    await client.query("COMMIT");
+    transactionStarted = false;
+    return res.json({ message: "Event deleted successfully." });
+  } catch (error) {
+    if (transactionStarted) {
+      await client.query("ROLLBACK").catch(() => {});
+    }
+
+    console.error("Deleting event failed:", error.message);
+    return res.status(500).json({
+      message: "Unable to delete event.",
+    });
+  } finally {
+    client.release();
+  }
+});
