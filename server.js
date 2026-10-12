@@ -1,4 +1,3 @@
-
 require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
@@ -18,16 +17,12 @@ app.use(express.json());
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: process.env.DATABASE_URL
-    ? { rejectUnauthorized: false }
-    : false,
+  ssl: process.env.DATABASE_URL ? { rejectUnauthorized: false } : false,
 });
 
 function authenticateToken(req, res, next) {
   const authHeader = req.headers.authorization;
-  const token = authHeader?.startsWith("Bearer ")
-    ? authHeader.slice(7)
-    : null;
+  const token = authHeader?.startsWith("Bearer ") ? authHeader.slice(7) : null;
 
   if (!token) {
     return res.status(401).json({
@@ -93,6 +88,10 @@ async function initializeDatabase() {
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
   `);
+  await pool.query(`
+    ALTER TABLE users
+    ADD COLUMN IF NOT EXISTS program VARCHAR(150)
+  `);
 
   const demoUsers = [
     {
@@ -112,7 +111,7 @@ async function initializeDatabase() {
   for (const user of demoUsers) {
     const existing = await pool.query(
       "SELECT id FROM users WHERE LOWER(email) = LOWER($1)",
-      [user.email]
+      [user.email],
     );
 
     if (existing.rowCount === 0) {
@@ -121,7 +120,7 @@ async function initializeDatabase() {
       await pool.query(
         `INSERT INTO users (name, email, password_hash, role)
          VALUES ($1, $2, $3, $4)`,
-        [user.name, user.email, passwordHash, user.role]
+        [user.name, user.email, passwordHash, user.role],
       );
     }
   }
@@ -146,10 +145,10 @@ app.post("/login", async (req, res) => {
 
     const result = await pool.query(
       `SELECT id, name, email, password_hash, role,
-              must_change_password
+              must_change_password, program
        FROM users
        WHERE LOWER(email) = LOWER($1)`,
-      [email.trim()]
+      [email.trim()],
     );
 
     if (
@@ -171,11 +170,9 @@ app.post("/login", async (req, res) => {
       });
     }
 
-    const token = jwt.sign(
-      { id: user.id, role: user.role },
-      secret,
-      { expiresIn: "8h" }
-    );
+    const token = jwt.sign({ id: user.id, role: user.role }, secret, {
+      expiresIn: "8h",
+    });
 
     return res.json({
       message: "Login successful.",
@@ -185,6 +182,7 @@ app.post("/login", async (req, res) => {
         name: user.name,
         email: user.email,
         role: user.role,
+        program: user.program,
         mustChangePassword: user.must_change_password,
       },
     });
@@ -201,19 +199,33 @@ app.post(
   authenticateToken,
   requireOrganizer,
   async (req, res) => {
-    const { firstName, lastName, personalEmail } = req.body;
+    const { firstName, lastName, password, program } = req.body;
+
+    const allowedPrograms = [
+      "Information Technology",
+      "Computer Science",
+      "Information Systems",
+      "Computer Engineering",
+      "Electronics Engineering",
+      "Data Science",
+      "Cybersecurity",
+      "Information Technology Education",
+      "Other technology-related program",
+    ];
 
     if (
       typeof firstName !== "string" ||
       typeof lastName !== "string" ||
-      typeof personalEmail !== "string" ||
+      typeof password !== "string" ||
+      typeof program !== "string" ||
       !firstName.trim() ||
       !lastName.trim() ||
-      !/^[^\s@]+@gmail\.com$/i.test(personalEmail.trim())
+      password.length < 8 ||
+      !allowedPrograms.includes(program)
     ) {
       return res.status(400).json({
         message:
-          "Enter a first name, last name, and valid personal Gmail address.",
+          "Enter valid names, a password of at least 8 characters, and a valid program.",
       });
     }
 
@@ -238,95 +250,56 @@ app.post(
 
     const campusEmail = `${firstInitial}.${surname}@campus.edu`;
     const name = `${first} ${last}`;
-    const recipient = personalEmail.trim().toLowerCase();
-    let createdUserId;
 
     try {
       const existing = await pool.query(
         "SELECT id FROM users WHERE LOWER(email) = LOWER($1)",
-        [campusEmail]
+        [campusEmail],
       );
 
       if (existing.rowCount > 0) {
         return res.status(409).json({
-          message: "That generated campus email already exists.",
+          message:
+            "That campus email already exists. Check the student's name.",
           email: campusEmail,
         });
       }
 
-      const temporaryPassword = crypto.randomBytes(18).toString("base64url");
-      const passwordHash = await bcrypt.hash(temporaryPassword, 10);
+      const passwordHash = await bcrypt.hash(password, 10);
 
       const inserted = await pool.query(
         `INSERT INTO users
            (name, email, password_hash, role, personal_email,
-            must_change_password)
-         VALUES ($1, $2, $3, 'Student', $4, TRUE)
+            must_change_password, program)
+         VALUES ($1, $2, $3, 'Student', NULL, FALSE, $4)
          RETURNING id`,
-        [name, campusEmail, passwordHash, recipient]
+        [name, campusEmail, passwordHash, program],
       );
 
-      createdUserId = inserted.rows[0].id;
-
-      const escapeHtml = (value) =>
-        value.replace(/[&<>"']/g, (character) => ({
-          "&": "&amp;",
-          "<": "&lt;",
-          ">": "&gt;",
-          '"': "&quot;",
-          "'": "&#39;",
-        })[character]);
-if (!resend) {
-  throw new Error("RESEND_API_KEY is not configured.");
-}
-      const emailResult = await resend.emails.send({
-        from: "CampusCount <onboarding@resend.dev>",
-        to: recipient,
-        subject: "Your CampusCount student account",
-        html: `
-          <h2>Welcome to CampusCount, ${escapeHtml(name)}!</h2>
-          <p>Your student account has been created.</p>
-          <p><strong>Campus email:</strong> ${escapeHtml(campusEmail)}</p>
-          <p><strong>Temporary password:</strong> ${escapeHtml(temporaryPassword)}</p>
-          <p>Please change your temporary password after signing in.</p>
-        `,
-      });
-
-      if (emailResult.error) {
-        throw new Error("Resend could not send the registration email.");
-      }
-
       return res.status(201).json({
-        message: "Student registered and email sent.",
+        message: "Student account created successfully.",
         student: {
-          id: createdUserId,
+          id: inserted.rows[0].id,
           name,
           email: campusEmail,
-          mustChangePassword: true,
+          program,
+          mustChangePassword: false,
         },
       });
     } catch (error) {
-      console.error("Student registration failed:", error.message);
-
-      if (createdUserId) {
-        try {
-          await pool.query("DELETE FROM users WHERE id = $1", [
-            createdUserId,
-          ]);
-        } catch (cleanupError) {
-          console.error(
-            "Registration cleanup failed:",
-            cleanupError.message
-          );
-        }
+      if (error.code === "23505") {
+        return res.status(409).json({
+          message: "That campus email already exists.",
+        });
       }
 
+      console.error("Student registration failed:", error.message);
+
       return res.status(500).json({
-        message:
-          "Registration failed. Check the API logs and email configuration.",
+        message: "Unable to create the student account.",
       });
     }
-  }
+  },
 );
 
 initializeDatabase()
