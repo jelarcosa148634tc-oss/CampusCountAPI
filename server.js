@@ -207,6 +207,7 @@ app.post(
       "Information Systems",
       "Computer Engineering",
       "Electronics Engineering",
+      "Electronics Engineering",
       "Data Science",
       "Cybersecurity",
       "Information Technology Education",
@@ -241,6 +242,7 @@ app.post(
 
     const firstInitial = normalize(first).charAt(0);
     const surname = normalize(last);
+    const name = `${first} ${last}`;
 
     if (!firstInitial || !surname) {
       return res.status(400).json({
@@ -248,32 +250,26 @@ app.post(
       });
     }
 
-    const campusEmail = `${firstInitial}.${surname}@campus.edu`;
-    const name = `${first} ${last}`;
-
     try {
-      const existing = await pool.query(
-        "SELECT id FROM users WHERE LOWER(email) = LOWER($1)",
-        [campusEmail],
+      // Reserve the next ID from the users table sequence.
+      const idResult = await pool.query(
+        "SELECT nextval(pg_get_serial_sequence('users', 'id')) AS id",
       );
 
-      if (existing.rowCount > 0) {
-        return res.status(409).json({
-          message:
-            "That campus email already exists. Check the student's name.",
-          email: campusEmail,
-        });
-      }
+      const studentId = Number(idResult.rows[0].id);
+
+      // Example: j.delacruz.3@campus.edu
+      const campusEmail = `${firstInitial}.${surname}.${studentId}@campus.edu`;
 
       const passwordHash = await bcrypt.hash(password, 10);
 
       const inserted = await pool.query(
         `INSERT INTO users
-           (name, email, password_hash, role, personal_email,
-            must_change_password, program)
-         VALUES ($1, $2, $3, 'Student', NULL, FALSE, $4)
+          (id, name, email, password_hash, role, personal_email,
+           must_change_password, program)
+         VALUES ($1, $2, $3, $4, 'Student', NULL, FALSE, $5)
          RETURNING id`,
-        [name, campusEmail, passwordHash, program],
+        [studentId, name, campusEmail, passwordHash, program],
       );
 
       return res.status(201).json({
@@ -289,7 +285,7 @@ app.post(
     } catch (error) {
       if (error.code === "23505") {
         return res.status(409).json({
-          message: "That campus email already exists.",
+          message: "That student ID or campus email already exists.",
         });
       }
 
@@ -301,14 +297,3 @@ app.post(
     }
   },
 );
-
-initializeDatabase()
-  .then(() => {
-    app.listen(PORT, () => {
-      console.log(`CampusCount API running on port ${PORT}`);
-    });
-  })
-  .catch((error) => {
-    console.error("Database initialization failed:", error.message);
-    process.exit(1);
-  });
